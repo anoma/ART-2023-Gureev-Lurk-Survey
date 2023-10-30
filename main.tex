@@ -1,0 +1,188 @@
+\documentclass[
+    9pt,            % 8-20pt possible
+    % twocolumn,      % switch, use twocolumn layout
+    techreport,        % select between  ``techreport'', ``report'', ``article'', ``commun'', ``persp'' and ``review''
+    % lineno,         % switch, adds line numbering
+    % tocfig,         % switch, use a TOC figure at the top (place in ./figs)
+    % SI,             % switch to Supplemental Information format, not compatible with twocolumn
+    affiltop,       % switch, put affiliations under authors (instead of footnote)
+    % nofootprint,    % do not add "Preprint" in footer
+    % nofootdate,     % do not add date in footer
+    % debug,          % switch, add debugging boxes
+    % draft,          % for quick compilations (no figures, references etc)
+]{art}
+
+\input{metadata.tex}
+\input{macros.tex}
+
+\begin{document}
+
+\maketitle
+% \iftoggle{SI}{}{\ifdef{\pubSI}{\footnotetext{\pubSI}}{}}
+
+\tableofcontents
+
+\section{Introduction}
+
+Lurk is a Lisp written in Rust for zkSNARKs supporting basic cryptographic functionality using Poseidon hashing as well as an Incrementally Verifiable Compulation (IVC) friendly evaluator.
+
+The report is aimed at a quick overview of Lurk's basic functionality as well as its possible value for the Juvix project. 
+
+There are several things to note before starting the report:
+
+\begin{enumerate}
+    \item The report is based on Lurk v0.2.0 and as presented in the source material listed below 
+    \item The report will make comparative claims based on the assumption that Lurk is working with the Nova backend, the only officially supported backend.
+    \item Another currently working backend is Groth16. A backend in possible development is Halo2.
+    \item There are Rust and Lisp versions of Lurk availiable. The Lisp version is currently unsupported.
+\end{enumerate}
+
+The main materials one is encouraged to consult and read alongside the report are:
+
+\begin{enumerate}
+    \item For a high-level description, the Lurk paper \cite{Lurk-paper}
+    \item For a low-level description, the official Lurk spec \cite{Lurk-spec}
+    \item For a quick intro, the Programmer's Intro of the Lurk team \cite{Lurk-intro}
+\end{enumerate}
+
+\section{Spec}
+
+\subsection{Frontend}
+The section is devoted to the description of Lurk, pointing to its central advantages and mechanics.
+
+Lurk is set up as an interpreter. It performs computations given an expression. The REPL takes a Lurk expression, then evaluates it recursively by spreading it out in \textbf{frames}. A \textbf{frame} is given by a 3-tuple consisting of 
+\begin{enumerate}
+    \item Lurk expression
+    \item Environment
+    \item Continuation
+\end{enumerate}
+
+\textbf{Expressions} are recursively given. There are strings, unsigned 64-bit integers, basic numbers (represented as elements of field of Pallas numbers\footnote{By default. Other primes are also availiable} suitable for a Nova backend), equality predicate, \tcbox{cons}, \tcbox{let}, \tcbox{if} expression, and \tcbox{letrec}, \tcbox{lambda}, basic arithmetic operations on field elements etc. expressions following the evaluating strategies using usual semantics. Note that \tcbox{letrec} allows for definitions of recursive functions.
+
+Each expression can be assigned to a DAG. E.g. an expression \tcbox{(let ((a (* 1 2))) (+ a (- 3 4)))} can be presented as
+% https://q.uiver.app/#q=WzAsOSxbMywwLCJcXHRleHR7bGV0fSJdLFsxLDEsIioiXSxbMCwyLCIxIl0sWzIsMiwiMiJdLFs0LDEsIisiXSxbMywyLCJhIl0sWzUsMiwiLSJdLFs0LDMsIjMiXSxbNiwzLCI0Il0sWzAsMV0sWzEsMl0sWzEsM10sWzAsNF0sWzQsNV0sWzQsNl0sWzYsN10sWzYsOF1d
+\[\begin{tikzcd}[cramped]
+	&&& {\text{let}} \\
+	& {*} &&& {+} \\
+	1 && 2 & a && {-} \\
+	&&&& 3 && 4
+	\arrow[from=1-4, to=2-2]
+	\arrow[from=2-2, to=3-1]
+	\arrow[from=2-2, to=3-3]
+	\arrow[from=1-4, to=2-5]
+	\arrow[from=2-5, to=3-4]
+	\arrow[from=2-5, to=3-6]
+	\arrow[from=3-6, to=4-5]
+	\arrow[from=3-6, to=4-7]
+\end{tikzcd}\]
+
+The expressions which make Lurk interesting with respect to cryptography are built-in \tcbox{commit} expressions, which - given a Lurk expression - make a cryptographic commitment using a Poseidon hash to any other Lurk expression. In particular, Lurk has in-built functional commitments. Committing an expression produces a field element with secret 0. A commitment can be opened using expression \tcbox{open} if and only if the REPL has a history of that field element being a commitment\footnote{Being a Poseidon hash result, a commitment is binding}. An explicit secret for a commitment may be made with \tcbox{secret} command. 
+
+Each expression is given by a pointer, consisting of a tag and a hash managed by a store.
+
+As a Lisp, everything is an expression evaluated left-to-right strictly and is either self-evaluating, reduces to something self-evaluated, or produces an error. 
+
+
+An \textbf{environment} is given by a consing of expressions, which were introduced by \tcbox{let} and \tcbox{letrec} expressions. Once expressions are evaluated, they are taken out of the environment.
+
+A \textbf{continuation} presents the next step for the computation to continue. Theoretically, it presents itself as a poset pointing to the type of the operation to be evaluated, as well as the predecessors to the operation. E.g. 
+
+\begin{minted}{lisp}
+> (+ 2 40)
+INFO lurk::eval > Frame: 0 
+Expr: (+ 2 40)
+Env: NIL
+Cont: Outermost
+
+INFO lurk::eval > Frame: 1 
+Expr: 2
+Env: NIL
+Cont: Binop{ operator: Sum, unevaled_args: (40), saved_env: NIL, continuation: Outermost }
+
+INFO lurk::eval > Frame: 2 
+Expr: 40
+Env: NIL
+Cont: Binop2{ operator: Sum, evaled_arg: 2, continuation: Outermost }
+
+INFO lurk::eval > Frame: 3 
+Expr: 42
+Env: NIL
+Cont: Terminal
+
+[3 iterations] => 42
+\end{minted}
+
+Here \tcbox{outerbox} is a state referring to the entire exression. Once the reducer returns to \tcbox{outermost} it then moves to \tcbox{terminal} to finish the computation and print results.  \tcbox{binop} stands for identifying that the right side of a binary operation will be evaluated, while \tcbox{binop2} is a continuation signaling that we, having evaluated both sides of a binary operation, are going to a frame actually reducing the operation to a field value.
+
+Hence, the reducer works by taking an expression, making it into a default frame\footnote{with \tcbox{nil} environment and \tcbox{outermost} continuation} applies the reducer per appropriate semantics moving from frame to frame until it reaches a frame with \tcbox{terminal} evaluation 
+
+The approach for using the frames is: "\textit{Do the minimum amount of work in the current step [...] and give the rest of the computation to (sic) [...] continuation...}" \footnote{\url{https://www.youtube.com/watch?v=wKqiIoOeogo}}
+
+\subsection{Backend}
+Now that we have demonstrated the reduction mechanism, let us discuss how this fits with the cryptographic backend.
+
+Arguably the one thing that makes the interpeter frontend really special is the built-in cryptographic commitment functionality\footnote{Specifically the (higher-order) function ones}.
+
+However, what is important is how those computations get checked and specifically how the frames approach to evaluation allows the Nova backend to be so (arguably) quick.
+
+Nova uses the approach of IVC or recursive ZKPs. It splits a statement into components and uses the fact that it provided proofs to said components to create a proof of an aggregate statement. This approach has multiple advantages for certain types of proofs, including the ability to prove things about recursive function without unrolling as well as parallel proof computation. In particular, Nova implements a prover which can prove statements of the from $y = F^l(x)$ for $F$ a (potentially non-deterministic) computation \cite{Nova}.
+
+The small-step evaluation via frames that Lurk provides allows for a logical splitting of a Lurk expression into blocks. The expression part of a frame is straightforwardly evaluable\footnote{This is due to the fact that - as stated in the previous section - the current frame does minimal work} while there is an explicit protocol for how to apply the continuation\footnote{For explicit compilation consult \cite{Lurk-spec}}. 
+
+This allows for the circuits built to be minimal: "Instead of building (sic) the whole Merkle tree in a single step..."\footnote{\url{https://www.youtube.com/watch?v=wKqiIoOeogo}} we allow for a proofs to be incrementally given and minimize circuit size.
+
+The compilation of individual expressions to circuits is not much different from the compilation proposed by \cite{geb-pipeline} or \cite{juvix-to-vampir} via VampIR. The core difference lies in the IVC approach and its components for which Lurk (seemingly) was built. 
+
+\section{Juvix interactions}
+
+Given the description above, we can consider how Lurk fits with the Juvix project in the ZKP language scene in two aspects: 
+
+\begin{enumerate}
+    \item As a backend
+    \item As a competitor
+\end{enumerate}
+
+As Lurk is Turing-complete, it can evidently be used as a Juvix backend. However, there seems to be an evident way to use teh Lurk backend through Yatima\footnote{\url{https://github.com/lurk-lab/yatima}}. Yatima is a compiler providing a Lurk backend to Lean4. While the project is not in active development, discussions with the Lurk team seems to indicate that it is still usable and is capable of compiling any Lean4 code which does not read/write to/from another file. 
+
+Viewing JuvixCore as a subcomponent of (Extensional) MLTT, we would be able to straightforwardly translate JuvixCore programs to Lean4 format. Implementing this will hence provide a direct way of using Lurk:
+
+% https://q.uiver.app/#q=WzAsMyxbMCwwLCJcXHRleHR7SnV2aXhDb3JlfSJdLFsyLDAsIlxcdGV4dHtMZWFuNH0iXSxbNCwwLCJcXHRleHR7THVya30iXSxbMCwxLCIiLDAseyJzdHlsZSI6eyJ0YWlsIjp7Im5hbWUiOiJob29rIiwic2lkZSI6InRvcCJ9fX1dLFsxLDIsIlxcdGV4dHtZYXRpbWF9Il1d
+\[\begin{tikzcd}[cramped]
+	{\text{JuvixCore}} && {\text{Lean4}} && {\text{Lurk}}
+	\arrow[hook, from=1-1, to=1-3]
+	\arrow["{\text{Yatima}}", from=1-3, to=1-5]
+\end{tikzcd}\]
+
+There are several caveats here, however: Yatima targets the Lisp version of Lurk and has quite an overhead. With respect to targeting the Lisp Lurk rather than the Rust version, the question is minor as syntax seems more or less interchangable. 
+
+In terms of competitors, while Lurk itself is not high-level enough to be a e.g. contract language, there are projects in development which might interest Anoma and Juvix team in particular. 
+
+\textbf{Glow}\footnote{\url{https://github.com/Glow-Lang/glow}} is a fronend to Lurk offering an environment for smart contract creation. In this sense, it can be considered a Juvix alternative. However, the project seems to be in active development rather than in usage. The whitepaper is dated 2020, while there is also a grant proposal\footnote{\url{https://github.com/filecoin-project/devgrants/issues/405}} dated 2021. 
+
+\textbf{FVM}\footnote{\url{https://github.com/filecoin-project/ref-fvm}} is a WASM based virtual machine in the Filecoin architecture that has proposed an integration with Lurk\footnote{\url{https://github.com/filecoin-project/devgrants/issues/808}}. The documentation indicates that the integration is a work in progress and is aimed at verifying computational claims through Lurk.
+
+\section{Concluding remarks}
+
+There are three main reasons for paying attention to Lurk
+
+\begin{enumerate}
+    \item It is a high-level interactive Turing-complete language for ZKP
+    \item In-built cryptographic commitments including (higher-order) functional once
+    \item The small-step evaluation paradigm allows for easy integration for IVS approach to ZKP, reducing circuit size and getting rid of recursion unrolling on compilation
+\end{enumerate}
+
+While the language itself is quite useful, interactive, computationally fast as well as offering cryptographicly important build-ins, the core importance of Lurk seems to be that it is a Nova (and similar languages) front-end. That is, other than having functional commitments, it's core design is aimed at IVC evaluation. 
+
+Juvix can take steps to target Lurk as a back-end, however, that step seems justified if we are actively interested in using IVC methods, i.e. if we want to compile e.g. to Nova. In particular, instead of thinking of a frame-evaluation-like method for Juvix we can port a Juvix command to Lurk in a straightforward way and let it do the block-splitting work for succesfull IVC usage. However, note that the current backend integration for Lurk is also in early development. Hence, it may make sense to think of a direct compiler from Juvix to Noma instead.
+
+Moreover, something to note is that there seem to be ongoing project for implementing ProtoStar\footnote{\url{https://eprint.iacr.org/2023/620.pdf}} for Halo2 which seems to be integrating an IVC approach similar to one in Nova (taking inspiration from Sangria project, currently deprecated). Since VampIR already supports a Halo2 backend we can also consider upgrading VampIR syntax in the future to include recursive functions that are solely compilable with Halo2 backend.
+
+
+\nocite{*}
+\bibliography{ref.bib}
+
+%\appendix
+%\section{Some extra stuff}
+
+
+\end{document}
